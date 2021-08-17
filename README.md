@@ -12,15 +12,15 @@ This can be used when storing the evolution of a monoidal value over time in a d
 
 The main motivation for such a system is one of preserving bandwidth. The value at time `t42` might be a very large object, but the series of changes leading from the value at time `t39` to the value at time `t42` might be very small. Magma provides a generic framework for representing values and transmitting them in settings where this assumption is reasonable.
 
-## Linear Magma
+## Developing the Protocol
 
-Linear magma is a simple exploration of the problem space which does not achieve desirable complexity goals. We use it to motivate the designs and then define the actual magma data format as a refinement of linear magma. We begin by giving a bunch of definitions:
+In this section we develop the core ideas of the protocol. We begin by giving a bunch of definitions:
 
-Let `(T, +_T, 0_T)` be a monoid, and let `value_sequence = [v_1, v_2, ..., v_k]` be a sequence of values of type `T`. We then call `delta_sequence = [d_1, d_2, ..., d_k]` the corresponding sequence such that `d_1 +_T d_2 +_T ... +_T d_i = v_i` for all `0 <= i <= k`.
+Let `(T, +_T, 0_T)` be a monoid, and let `value_sequence = [v_1, v_2, ..., v_k]` be a sequence of values of type `T`. We then call `predecessor_delta_sequence = [d_1, d_2, ..., d_k]` the corresponding sequence such that `d_1 +_T d_2 +_T ... +_T d_i = v_i` for all `1 <= i <= k`.
 
-Let `h` be a secure hash function. An `Event` consists of a `predecessor_delta_id` which is the digest of some value of type `T`, and the `predecessor_event_id` which is either the digest of an `Event` or the digest zero. For a `value_sequence = [v_1, v_2, ..., v_k]` with `delta_sequence = [d_1, d_2, ..., d_k]`, the corresponding `event_sequence = [e_1, e_2, ..., e_k]` is recursively defined as `e_1 = Event { predecessor_delta_id = h(d_1), predecessor_event_id = 0 }`, `e_i = Event { predecessor_delta_id = h(d_i), predecessor_event_id = h(e_{i-1}) }`.
+Let `h` be a secure hash function. An `Event` consists of a `predecessor_delta_id` which is the digest of some value of type `T`, and the `predecessor_event_id` which is either the digest of an `Event` or the digest zero. For a `value_sequence = [v_1, v_2, ..., v_k]` with `predecessor_delta_sequence = [d_1, d_2, ..., d_k]`, the corresponding `event_sequence = [e_1, e_2, ..., e_k]` is recursively defined as `e_1 = Event { predecessor_delta_id = h(d_1), predecessor_event_id = 0 }`, `e_i = Event { predecessor_delta_id = h(d_i), predecessor_event_id = h(e_{i-1}) }`.
 
-Now suppose `A` is a peer that knows the values `v_i` and `e_i` for some `1 <= i < k`, and `h(e_j)` for some `i < j <= k`. `B` is a peer that knows the full `delta_sequence`, `event_sequence`, and can efficiently map the hash of any known event to the corresponding event value. `A` wants to obtain `v_j` by communicating with `B`, but does not trust `B`. This can be achieved through the following sequence of events:
+Now suppose `A` is a peer that knows the values `v_i` and `e_i` for some `1 <= i < k`, and `h(e_j)` for some `i < j <= k`. `B` is a peer that knows the full `predecessor_delta_sequence`, `event_sequence`, and can efficiently map the hash of any known event to the corresponding event value. `A` wants to obtain `v_j` by communicating with `B`, but does not trust `B`. This can be achieved through the following sequence of events:
 
 - `A` sends: "I would like to obtain the value corresponding to `h(e_j)`, my current level of knowledge is `h(e_i)`"
 - `A` initializes the local variable `accumulator` to `v_i`
@@ -29,7 +29,7 @@ Now suppose `A` is a peer that knows the values `v_i` and `e_i` for some `1 <= i
 - `B` then sends `d_{i+1}`, then `d_{i+2}`, and so on, up to `d_j`
 - when `A` receives `e_j`, it verifies that hashing that value does indeed yield `h(e_j)`
 - next, when `A` receives any of the successive events, it verifies that hashing it yields the `predecessor_event_id` of the previously received event
-- next, when `A` receives `e_{i+1}`, it verifies that its `predecessor_event_id` is equal to `h(e_i)`
+- next, when `A` receives `e_{i+1}`, it also verifies that its `predecessor_event_id` is equal to `h(e_i)`
 - next, when `A` receives some `d_l`, it verifies that hashing it yields the `predecessor_delta_id` of `e_l`, and then updates `accumulator` to `accumulator +_T d_l`
 
 This exchange enables `A` to detect if `B` tries to send invalid data. Because events include hashes of monoid values rather than the values themselves, the number of bytes transferred in the initial phase of `B`'s transmission does not depend on the size of the values.
@@ -38,6 +38,73 @@ There is however still a denial of service attack `B` can perform: rather than s
 
 To protect against this, we add a third datum to each event `e_i`: `predecessor_delta_size`, the number of bytes in the transport encoding of `d_i`. This information allows `A` to drop the connection when a value transmitted by `B` exceeds the size promised in its corresponding event. This mechanism can only work if the `predecessor_delta_size` of all events in circulation is accurate, for that reason `A` has to reject a potential `d_l` if it is too small as well, even if the hash is correct.
 
-This protocol has exhibits complexities: `B` sends `j - i` many events, and `A` has to store that many events in memory in order to check the integrity of the following delta sequence. We now describe the real magma protocol, which employs a [binary anti-monotone linking scheme](TODO) to reduce these complexities to `O(log(j - i))`. The remainder of this text assumes familiarity with the concepts and terminology introduced in that link.
+This protocol exhibits linear complexities: `B` sends `j - i` many events, and `A` has to store that many events in memory in order to check the integrity of the following delta sequence. We can employ a [binary anti-monotone linking scheme](https://aljoscha-meyer.de/linkingschemes) to reduce these complexities to `O(log(j))`. The remainder of this text assumes familiarity with the concepts and terminology introduced in that link. In particular, we use the function [`ls3`](https://aljoscha-meyer.de/linkingschemes#lsthree).
 
-## Logarithmic Complexities
+We extend the definition of an event `e_i` to include the following data:
+
+- `sequence_number`, a 64-bit integer set to `i` (magma does not support sequences of length greater than `2^64 - 1`, and sequence numbers start at `1`)
+- `skip_delta_id`, the monoid value `s_i` such that `v_{bs3(i)} +_T s_i = v_i`, or `v1` if `i = 1`
+- `skip_event_id`, the digest `h(e_{bs3(i)})`, or `0` if `i = 1`
+- `skip_delta_size`, the number of bytes in the transport encoding of `s_i`
+
+Intuitively, `B` can now send data along the shortest path between `e_j` and `e_i`, rather than going through all the predecessor links. More precisely, consider again the situation where
+
+- `A` is a peer that knows the values `v_i` and `e_i` for some `1 <= i < k`, and `h(e_j)` for some `i < j <= k`.
+- `B` is a peer that knows the full `predecessor_delta_sequence`, `event_sequence`, and can efficiently map the hash of any known event to the corresponding event value.
+- `A` wants to obtain `v_j` by communicating with `B`, but does not trust `B`.
+
+Using the extended definition of an event, this can be done with fewer messages and state:
+
+- `A` sends: "I would like to obtain the value corresponding to `h(e_j)`, my current level of knowledge is `h(e_i)`"
+- `A` initializes the local variable `accumulator` to `v_i`
+- `B` looks up `e_j` and then recursively follows links along the shortest path to `e_i`, obtaining the shortest path of events `p_1, p_2, ..., p_x` with `p_1 = e_j` and `p_x = e_i`; if it does not reach `e_i` this way, it politely informs `A` that it cannot be of service
+- `B` sends `p_1`, then `p_2`, and so on, up to `p_{x-1}`
+- `B` then sends `delta(p_{x-1})`, then `delta(p_{x-2})`, and so on, up to `delta(p_1)`, where `delta(p_i)` is a value `v` such that `h(v) = p_i.predecessor_delta_id` if `p_i.sequence_number = p_{i+1}.sequence_number + 1`, or a value `v` such that `h(v) = p_i.skip_delta_id` otherwise
+- when `A` receives `p_j`, it verifies that hashing that value does indeed yield `h(e_j)`
+- next, when `A` receives any of the successive events, it verifies that hashing it yields the `predecessor_event_id` or `skip_event_id` of the previously received event, depending on which one is appropriate
+- next, when `A` receives `p_{i+1}`, it also verifies that its `predecessor_event_id` or `skip_event_id` is equal to `h(e_i)`, depending on which one is appropriate
+- next, when `A` receives some `d_l`, it verifies that hashing it yields the `predecessor_delta_id` or `skip_event_id` of the corresponding event, depending on which one is appropriate, and then updates `accumulator` to `accumulator +_T d_l`
+
+## Precise Encoding
+
+Because magma relies on hashing for integrity verification, the encoding of events must be well-defined. The proceeding text talked about comparing hashes directly, but we can use a slightly more general concept.
+
+Let `T` and `N` be sets, and let `compute_name: T -> N` and `verify_name: (T, N) -> Bool` be functions. We call `(compute_name, verify_name)` a *naming scheme* if for all `t` in `T` we have `verify_name(t, compute_name(t)) = true`. Magma is only as secure as the naming scheme it uses, ideally `verify_name(t, compute_name(u)) = false` for all `u != t`. A typical choice based on some secure hash function `h` would be `compute_name(t) := h(t)` and `verify_name(t, n) := (h(t) == n)`. Naming schemes however also support multihashes, where a name consists of a secure hash together with an indicator which hash function was used to compute it. The verification function then select the appropriate hash function, compute it, and then check for equality.
+
+Magma does not prescribe a particular naming scheme or monoid of values, so the protocol is generic. An instantiation of the protocol requires the following information:
+
+- a monoid `(T, +_T, 0_T)`
+- a bijective function `encode_monoid: T -> {0, 1}^*` uniquely mapping monoid values to byte strings
+- a naming scheme `(compute_name: {0, 1}^* -> N, verify_name: ({0, 1}^*, N) -> Bool)`
+- a `reserved_name` from `N` that can be used to encode that no predecessor exists
+- a bijective function `encode_name: N -> {0, 1}^*` uniquely mapping names to byte strings
+
+Given choices for these parameters, a magma *event* logically consists of the following data:
+
+```rust
+struct LogicalEvent {
+  sequence_number: NonZeroU64, // 1-based index of this event in the evolution of the value
+
+  predecessor_event: Option<LogicalEvent>, // the predecessor event, None if this is the first event
+  predecessor_delta: T, // change compared to the predecessor event
+  predecessor_delta_size: u64, // size in bytes of this.predecessor_delta
+
+  skip_event: Option<LogicalEvent>, // the skip event, None if this is the first event
+  skip_delta: T, // change compared to the skip event
+  skip_delta_size: u64, // size in bytes of this.skip_delta
+}
+```
+
+Such an `e: LogicalEvent` is encoded by `encode_event: LogicalEvent -> {0, 1}^*` as follows:
+
+- begin with `e.sequence_number`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
+- if `e.skip_event = Some(se)` append `compute_name(encode_event(se))`, otherwise append `reserve_name`
+- if `e.predecessor_event = Some(pe)` append `compute_name(encode_event(pe))`, otherwise append `reserve_name`
+- append `e.skip_delta_size`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
+- append `compute_name(encode_monoid(e.skip_delta))`
+- append `e.predecessor_delta_size`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
+- append `compute_name(encode_monoid(e.predecessor_delta))`
+
+## Transmission Protocol
+
+WIP

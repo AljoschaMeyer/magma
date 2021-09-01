@@ -2,6 +2,8 @@
 
 A specification and protocol for representing and transmitting values that changed over time in an untrusted decentralized setting.
 
+**Status: work in progress. The ideas are mostly there, but the write-up is a mess.**
+
 Magma revolves around two concepts: cryptographically secure hashes and monoids. A [cryptographically secure hash function](https://en.wikipedia.org/wiki/Cryptographic_hash_function) maps values to short digest which are unique with a very high probability, and even a malicious act there trying to find values that hash to non-unique digest cannot do better than that probability dictates.
 
 A [monoid](https://en.wikipedia.org/wiki/Monoid) is a set of values with a binary operation that is associative and has a neutral element. Monoids can be used to represent values changing over time. Consider for example a variable holding an integer. Rather than representing its evolution over time by keeping a sequence of the values the variable held, you can keep a sequence of the differences between the values. An integer can not only be interpreted as a specific value, but also as an operation that can be applied to a different value by adding it. Even when thinking of an integer as a value, you can interpreted as the operation taking the neutral element (zero) to the desired value.
@@ -98,13 +100,45 @@ struct LogicalEvent {
 Such an `e: LogicalEvent` is encoded by `encode_event: LogicalEvent -> {0, 1}^*` as follows:
 
 - begin with `e.sequence_number`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
-- if `e.skip_event = Some(se)` append `compute_name(encode_event(se))`, otherwise append `reserve_name`
-- if `e.predecessor_event = Some(pe)` append `compute_name(encode_event(pe))`, otherwise append `reserve_name`
-- append `e.skip_delta_size`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
-- append `compute_name(encode_monoid(e.skip_delta))`
+- if `e.skip_event = Some(se)` and `e.skip_event != e.predecessor_event` append `compute_name(encode_event(se))`, otherwise append `reserved_name`
+- if `e.predecessor_event = Some(pe)` append `compute_name(encode_event(pe))`, otherwise append `reserved_name`
+- if `e.skip_event != e.predecessor_event`, append `e.skip_delta_size` , encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
+- if `e.skip_event != e.predecessor_event`, append `compute_name(encode_monoid(e.skip_delta))`
 - append `e.predecessor_delta_size`, encoded as a canonic [`VarU64`](https://github.com/AljoschaMeyer/varu64)
 - append `compute_name(encode_monoid(e.predecessor_delta))`
 
 ## Transmission Protocol
 
-WIP
+We distinguish three distinct phases in the communication for transmitting magma data: the request, the metadata transmission, and the value transmission. We now discuss the different options for the metadata transmission and value transmission phases that the protocol should provide, which then guides the request design and the actual bit-level protocol description.
+
+### Metadata Transmission
+
+The metadata of interest is determined by the name of the event that corresponds to the *target* value of the requesting endpoint wants to fetch, and the name of the *base* event for which the requesting endpoint already knows the value. The requesting endpoint may have no base event available, in which case it transmits the `reserved_name` instead.
+
+If the sequence number of the *target* is greater than or equal to the sequence number of the *base*, then the metadata transmission consists of the events on the shortest path from the *target* to the *base*, otherwise the transmission consists of the events on the shortest path from the *base* to the *target*. If the responding endpoint does not have all that data, it transmits the longest prefix of the path for which it has the data, and then terminates the transmission. If the responding endpoint does not know either the *base* or *target* name, this is merely a special case where the longest prefix has length zero.
+
+Because a response might stop after a prefix of the required metadata (either because of unavailable data or because of a connection loss), it can happen that an endpoint already has a prefix of the metadata that is of interest for a request. To prevent unnecessary retransmission of that metadata, every request contains a number indicating how many of the metadata events to skip over, i.e., the first `x` events of the shortest path are not transmitted. If that number is equal to the length of the path, then no metadata is transmitted at all. Any number greater than the length of that path is treated as if it was the length of the path. A zero simply results in the full path being transmitted.
+
+Sometimes an endpoint is merely interested in how much data *could* be transmitted rather than the data itself. A request thus includes a *dry run* flag.
+
+### Value Transmission
+
+There are a few variations of how values are transmitted. First, a request can be *metadata-only*, indicating that no values shall be transmitted at all. If values are to be transmitted, the request and specify whether they should be transmitted in ascending or descending order. When choosing descending order, it is not necessary to transfer the metadata in advance, the transmission can go metadata, value, metadata, value, ... instead.
+
+If no metadata needs to be transmitted before the first value, the request can indicate that a prefix of the encoding of the value is already available at the requesting endpoint. The request then includes the number of bytes that are already available, and also the name of that prefix.
+
+### Protocol Organization
+
+The protocol is symmetric, and is organized into multiple, independent streams. Each endpoint has three outgoing communication streams, as well as the three corresponding incoming streams.
+
+The first pair of streams is for sending all receiving requests. Backpressure is applied in units of full requests. In addition to the options regarding metadata and value transmissions, a request has a RequestId, a 64 bit integer. This way, multiple requests can be sent before the older ones have been answered. RequestIds should be fresh, the protocol does not specify how an implementation should handle duplicate IDs (this way, implementations can simply assume it never happens - if the other endpoint receives garbage because it duplicated IDs, then that is their fault and problem).
+
+The second pair of streams is for canceling request. A cancellation does not consume any credit, the space requirements for handling cancellation of a request should be reserved when issuing credit for that request. A cancellation specifies the RequestId of the request to be cancelled. After receiving a cancellation, an endpoint should terminate the corresponding response as soon as possible (the same way it would indicate that it was missing any further data). Receiving a cancellation request for an unknown RequestID is an error.
+
+The third pair of streams is for transmitting metadata and values. One credit corresponds to one byte of metadata or value encoding. Value encoding... TODO
+
+
+- active request
+
+- how to do logs (caching the state of the hash functions at certain points etc.)
+- homomorphic hashing as an alternative (probably not of practical relevance?) 

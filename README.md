@@ -4,6 +4,8 @@ A specification and protocol for representing and transmitting values that chang
 
 **Status: work in progress. The ideas are mostly there, but the write-up is a mess.**
 
+**[https://aljoscha-meyer.de/magma](https://aljoscha-meyer.de/magma) is more up-to-date, ignore this for now**
+
 Magma revolves around two concepts: cryptographically secure hashes and monoids. A [cryptographically secure hash function](https://en.wikipedia.org/wiki/Cryptographic_hash_function) maps values to short digest which are unique with a very high probability, and even a malicious act there trying to find values that hash to non-unique digest cannot do better than that probability dictates.
 
 A [monoid](https://en.wikipedia.org/wiki/Monoid) is a set of values with a binary operation that is associative and has a neutral element. Monoids can be used to represent values changing over time. Consider for example a variable holding an integer. Rather than representing its evolution over time by keeping a sequence of the values the variable held, you can keep a sequence of the differences between the values. An integer can not only be interpreted as a specific value, but also as an operation that can be applied to a different value by adding it. Even when thinking of an integer as a value, you can interpreted as the operation taking the neutral element (zero) to the desired value.
